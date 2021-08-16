@@ -55,13 +55,14 @@ public class JobConfig
 
   @Bean
   @StepScope
-  public PartitionHandler partitionHandler(TaskLauncher taskLauncher, JobExplorer jobExplorer, @Value("#{stepName}") String stepName, @Value("#{stepExecution}") StepExecution stepExecution)
+  public PartitionHandler partitionHandler(@Value("#{stepExecution}") StepExecution stepExecution)
   {
+    String currentStepName = stepExecution.getStepName();
+    String workerStepName = stepExecution.getJobExecution().getExecutionContext().getString(currentStepName + "_corresponding_worker_job");
     Resource resource = this.resourceLoader
       .getResource("maven://fr.simplex_software.tests:partitioned-job:1.0-SNAPSHOT");
     DeployerPartitionHandler partitionHandler =
-      new DeployerPartitionHandler(taskLauncher, jobExplorer, resource,
-        /*stepExecution.getJobExecution().getExecutionContext().getString("workerStep")*/stepName, taskRepository);
+      new DeployerPartitionHandler(taskLauncher, jobExplorer, resource, workerStepName, taskRepository);
     TaskExecution taskExecution = taskExplorer.getTaskExecution(taskExplorer.getTaskExecutionIdByJobExecutionId(stepExecution.getJobExecutionId()));
     partitionHandler.beforeTask(taskExecution);
     List<String> commandLineArgs = new ArrayList<>(3);
@@ -72,7 +73,7 @@ public class JobConfig
       .setCommandLineArgsProvider(new PassThroughCommandLineArgsProvider(commandLineArgs));
     partitionHandler
       .setEnvironmentVariablesProvider(new SimpleEnvironmentVariablesProvider(this.environment));
-    partitionHandler.setMaxWorkers(2);
+    partitionHandler.setMaxWorkers(GRID_SIZE); // Understanding is workers should be equal/larger than number of grid
     partitionHandler.setApplicationName("PartitionedBatchJobTask");
     return partitionHandler;
   }
@@ -97,7 +98,7 @@ public class JobConfig
   @Profile("worker")
   public DeployerStepExecutionHandler stepExecutionHandler(JobExplorer jobExplorer)
   {
-     return new DeployerStepExecutionHandler(this.context, jobExplorer, this.jobRepository);
+    return new DeployerStepExecutionHandler(this.context, jobExplorer, this.jobRepository);
   }
 
   @Bean
@@ -106,7 +107,7 @@ public class JobConfig
   {
     return (contribution, chunkContext) ->
     {
-       return RepeatStatus.FINISHED;
+      return RepeatStatus.FINISHED;
     };
   }
 
@@ -116,16 +117,35 @@ public class JobConfig
     return this.stepBuilderFactory.get("step1")
       .partitioner(workerStep().getName(), partitioner())
       .step(workerStep())
-      .partitionHandler(partitionHandler(taskLauncher, jobExplorer, "workerStep",null))
+      .partitionHandler(partitionHandler(null))
       .build();
   }
 
   @Bean
   public Step workerStep()
   {
-     return this.stepBuilderFactory.get("workerStep")
+    return this.stepBuilderFactory.get("workerStep")
       .tasklet(workerTasklet(null))
       .build();
+  }
+
+  @Bean
+  public JobExecutionListener jobExecutionListener()
+  {
+    JobExecutionListener listener = new JobExecutionListener()
+    {
+      @Override
+      public void beforeJob(JobExecution jobExecution)
+      {
+        jobExecution.getExecutionContext().putString("step1_corresponding_worker_job", "workerStep");
+      }
+
+      @Override
+      public void afterJob(JobExecution jobExecution)
+      {
+      }
+    };
+    return listener;
   }
 
   @Bean
@@ -134,6 +154,7 @@ public class JobConfig
   {
     return this.jobBuilderFactory.get("partitionedJob")
       .incrementer(new RunIdIncrementer())
+      .listener(jobExecutionListener())
       .start(step1())
       .build();
   }
